@@ -1,0 +1,129 @@
+name: Build Android APK (Flutter)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      GRADLE_OPTS: "-Djava.net.preferIPv4Stack=true -Dorg.gradle.daemon=false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show repository files (debug)
+        run: |
+          echo "Repo root:"
+          ls -la
+          echo ""
+          echo "Find tools/main.dart:"
+          find . -maxdepth 6 -type f -path "*/tools/main.dart" -print || true
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Create Flutter project scaffold
+        run: |
+          flutter --version
+          flutter create . --project-name pumpen_rechner --org de.palliativteam.hochtaunus --platforms=android
+
+      - name: Patch Gradle repositories (Maven Central mirror)
+        run: |
+          python3 - << 'PY'
+          import pathlib, re
+          p = pathlib.Path("android/settings.gradle.kts")
+          txt = p.read_text(encoding="utf-8")
+          mirror = 'maven(url = "https://maven-central.storage-download.googleapis.com/maven2/")'
+
+          def add_mirror(block_name, txt):
+              pattern = rf"({block_name}\s*\{{[\s\S]*?repositories\s*\{{)([\s\S]*?)(\}}[\s\S]*?\}})"
+              m = re.search(pattern, txt)
+              if not m:
+                  return txt
+              head, body, tail = m.group(1), m.group(2), m.group(3)
+              if "maven-central.storage-download.googleapis.com" in body:
+                  return txt
+              if "mavenCentral()" in body:
+                  body = re.sub(r"\s*mavenCentral\(\)",
+                                f"\n    {mirror}\n    mavenCentral()",
+                                body, count=1)
+              else:
+                  body = f"\n    {mirror}\n" + body
+              return txt[:m.start()] + head + body + tail + txt[m.end():]
+
+          txt2 = txt
+          txt2 = add_mirror("pluginManagement", txt2)
+          txt2 = add_mirror("dependencyResolutionManagement", txt2)
+          p.write_text(txt2, encoding="utf-8")
+          PY
+
+      - name: Apply app code, assets, and Android icon (auto-detect tools path)
+        run: |
+          TOOLS_MAIN="$(find . -maxdepth 6 -type f -path "*/tools/main.dart" -print -quit)"
+          if [ -z "$TOOLS_MAIN" ]; then
+            echo "ERROR: tools/main.dart not found in repository."
+            echo "Please upload the 'tools' folder to the repo root (so it's ./tools/main.dart)."
+            exit 1
+          fi
+          TOOLS_DIR="$(dirname "$TOOLS_MAIN")"
+          echo "Using TOOLS_DIR=$TOOLS_DIR"
+
+          cp -f "$TOOLS_DIR/main.dart" lib/main.dart
+
+          mkdir -p assets
+          cp -f "$TOOLS_DIR/assets/logo.png" assets/logo.png
+
+          cp -f "$TOOLS_DIR/android_res/mipmap-mdpi/ic_launcher.png" android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          cp -f "$TOOLS_DIR/android_res/mipmap-hdpi/ic_launcher.png" android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          cp -f "$TOOLS_DIR/android_res/mipmap-xhdpi/ic_launcher.png" android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          cp -f "$TOOLS_DIR/android_res/mipmap-xxhdpi/ic_launcher.png" android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          cp -f "$TOOLS_DIR/android_res/mipmap-xxxhdpi/ic_launcher.png" android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+
+          sed -i 's/android:label="PalliCalc"]*"/android:label="PalliCalc"/' android/app/src/main/AndroidManifest.xml
+
+          cat > pubspec.yaml << 'YAML'
+          name: pumpen_rechner
+          description: Palliativteam Hochtaunus - Pumpen Rechner
+          publish_to: "none"
+          version: 1.0.0+1
+
+          environment:
+            sdk: ">=3.0.0 <4.0.0"
+
+          dependencies:
+            flutter:
+              sdk: flutter
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+
+          flutter:
+            uses-material-design: true
+            assets:
+              - assets/logo.png
+          YAML
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
